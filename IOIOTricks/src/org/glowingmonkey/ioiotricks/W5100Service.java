@@ -1,8 +1,8 @@
 package org.glowingmonkey.ioiotricks;
 
 import ioio.lib.api.DigitalInput;
-import ioio.lib.api.DigitalInput.Spec.Mode;
 import ioio.lib.api.DigitalOutput;
+import ioio.lib.api.DigitalInput.Spec.Mode;
 import ioio.lib.api.SpiMaster;
 import ioio.lib.api.SpiMaster.Rate;
 import ioio.lib.api.exception.ConnectionLostException;
@@ -12,9 +12,6 @@ import ioio.lib.util.android.IOIOService;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-
-import org.apache.commons.codec.android.binary.Hex;
-
 import android.content.Intent;
 import android.os.Bundle;
 import android.os.IBinder;
@@ -40,8 +37,6 @@ public class W5100Service extends IOIOService {
 	protected IOIOLooper createIOIOLooper() {
 		return new BaseIOIOLooper() {
 			private SpiMaster spi;
-			private byte[] readaddr = new byte[] {10};
-			private ByteBuffer bytebuf;
 			
 			static final int misoPin = 30;
 			static final int mosiPin = 31;
@@ -51,7 +46,6 @@ public class W5100Service extends IOIOService {
 			@Override
 			protected void setup() throws ConnectionLostException,
 					InterruptedException {
-				//spi = ioio_.openSpiMaster(37, 38, 39, 40, SpiMaster.Rate.RATE_125K);
 				spi = ioio_.openSpiMaster(new DigitalInput.Spec(misoPin,
 						Mode.PULL_UP), new DigitalOutput.Spec(mosiPin),
 						new DigitalOutput.Spec(clkPin),
@@ -59,66 +53,149 @@ public class W5100Service extends IOIOService {
 						new SpiMaster.Config(Rate.RATE_1M, false, false));
 				
 				// Reset the chip
-				W5100_write(Registers.MR, (byte) Registers.MR_RST);
+				W5100_write(Registers.MR, Registers.MR_RST);
 				W5100_write(Registers.IMR, (byte) 0xdf);
 				W5100_write(Registers.RTR0, new byte[] {0x07,(byte) 0xd0});
 				//W5100_write(Registers.RTR1, (byte) 0xd0);
 				W5100_write(Registers.RCR, (byte) 0x08);
 				
 				// set a MAC
-				W5100_write(Registers.SIPR0, new byte[] {(byte) 0xde,(byte) 0xad,(byte) 0xbe,(byte) 0xef,0,1});
-				
-				// set an IP
-				W5100_write(Registers.SIPR0, new byte[] {10,20,30,44});
-				// netmask
-				W5100_write(Registers.SUBR0, new byte[] {10,20,30,44});
-				W5100_write(Registers.SUBR0, new byte[] {(byte)255,(byte)255,(byte)255,0});
-				// Gateway
-				W5100_write(Registers.GAR0, new byte[] {10,20,30,1});
+				W5100_write(Registers.SHAR0, new byte[] {(byte) 0xde,(byte) 0xad,(byte) 0xbe,(byte) 0xef,0,1});
 				
 				// Set buffer sizes, 2k to each socket
 				W5100_write(Registers.TMSR,(byte)0x55);
 				W5100_write(Registers.RMSR,(byte)0x55);
+				
+				// set an IP
+				W5100_write(Registers.SIPR0, new byte[] {10,20,30,44});
+				// netmask
+				W5100_write(Registers.SUBR0, new byte[] {(byte)255,(byte)255,(byte)255,0});
+				// Gateway
+				W5100_write(Registers.GAR0, new byte[] {10,20,30,1});
+				
+				//setupMACSocket(); // Socket 0, mac raw
+				setupUDPSocket(1, (short)68); // Socket 1, DHCP
+				setupUDPSocket(2, (short)138); // Socket 2, Browser
+				
+				appLog("Setup complete");
 			};
 
 			@Override
 			public void loop() throws ConnectionLostException,
 					InterruptedException {
-				appLog("W5100 MR: 0b"+Integer.toBinaryString(W5100_read8(Registers.MR)));
-				appLog("W5100 IR: 0b"+Integer.toBinaryString(W5100_read8(Registers.IR)));
-				appLog("W5100 TMSR: 0x"+Integer.toHexString(W5100_read8(Registers.TMSR)));
-				appLog("W5100 GAR0: 0x"+Integer.toHexString(W5100_read8(Registers.GAR0)));
-				Thread.sleep(1000);
+				byte IR = W5100_read8(Registers.IR);
+				//appLog("W5100 IR: 0x"+toHex(IR));
+
+				if ((IR & Registers.IR_S0_INT) != 0){
+					handleSocketInt(0);
+				}
+				if ((IR & Registers.IR_S1_INT) != 0){
+					handleSocketInt(1);
+				}
+				if ((IR & Registers.IR_S2_INT) != 0){
+					handleSocketInt(2);
+				}
+				if ((IR & Registers.IR_S3_INT) != 0){
+					handleSocketInt(3);
+				}
+				
+				Thread.sleep(100);
+			}
+
+			private void handleSocketInt(int socket) throws ConnectionLostException, InterruptedException {
+				byte S_IR = W5100_read8(SOCKET_REG(socket,Registers.S_IR));
+				appLog("W5100 S"+Integer.toString(socket)+"_IR: 0x"+toHex(S_IR));
+				StringBuilder events = new StringBuilder();
+				events.append("Interrupt on "+Integer.toString(socket));
+				if ((S_IR & Registers.S_IR_CON) != 0) {
+					events.append("(CON)");
+				}
+				if ((S_IR & Registers.S_IR_DISCON) != 0) {
+					events.append("(DISCON)");
+				}
+				if ((S_IR & Registers.S_IR_RECV) != 0) {
+					short RSR = W5100_read16(SOCKET_REG(socket,Registers.S_RX_RSR0));
+					short RD = W5100_read16(SOCKET_REG(socket,Registers.S_RX_RD0));
+					short off = (short) (RD & Registers.SOCKET_RX_MASKS[socket]);
+					events.append("(RECV "+toHex(RSR)+" at "+toHex(off)+")");
+					// actually read the data from address Registers.SOCKET_RX_BASES[socket]+off onward, wrapping if needed
+					// ..or lie about it 
+					byte[] recvbuf = new byte[RSR];
+					W5100_read((short)(Registers.SOCKET_RX_BASES[socket]+off), recvbuf);
+					Log.d("UDP In", toHex(recvbuf));
+					// Tell the W5100 we got it
+					W5100_write(SOCKET_REG(socket,Registers.S_RX_RD0), (short) (RD+RSR+8)); // 8 = W5100 UDP header size
+					W5100_write(SOCKET_REG(socket,Registers.S_CR), Registers.S_CR_RECV);
+					while (W5100_read8(SOCKET_REG(socket,Registers.S_CR)) != (byte) 0) {};
+				}
+				if ((S_IR & Registers.S_IR_TIMEOUT) != 0) {
+					events.append("(TIMEOUT)");
+				}
+				if ((S_IR & Registers.S_IR_SEND_OK) != 0) {
+					events.append("(SEND_OK)");
+				}
+				appLog(events.toString());
+				// clear the interrupts
+				W5100_write(SOCKET_REG(socket,Registers.S_IR),S_IR);
 			}
 
 			private void appLog(String logline) {
 				Message msg = Message.obtain();
 				msg.what = 1;
+				msg.obj = logline;
 				try {
 					messenger.send(msg);
 				} catch (RemoteException e) {
 					Log.e(getClass().getName(), "Exception sending message", e);
 					e.printStackTrace();
 				}
-				msg.obj = logline;
+				
 			}
 
-			public byte W5100_read8(short addr) throws ConnectionLostException, InterruptedException {
+			private byte W5100_read8(short addr) throws ConnectionLostException, InterruptedException {
 				byte[] cmdbuf = new byte[4];
-				byte[] respbuf = new byte[4];
+				byte[] respbuf = new byte[1];
 	
 				cmdbuf[0] = 0x0F; // Read command
 				cmdbuf[1] = (byte) ((addr & 0xFF00) >> 8);
 				cmdbuf[2] = (byte) (addr & 0x00FF);
 				cmdbuf[3] = 0; // no data for a read
 				
-				logByteArray("W5100_read8(cmd)", cmdbuf);
-				
 				spi.writeRead(cmdbuf, 3, 4, respbuf, 1);
-				logByteArray("W5100_read8(resp)", respbuf);
+				Log.d("W5100_read8", "Read " + toHex(respbuf[0]) + " from "+toHex(addr));
 				return respbuf[0];
 			}
-			public void W5100_write(short addr, byte[] data) throws ConnectionLostException, InterruptedException {
+			private short W5100_read16(short addr) throws ConnectionLostException, InterruptedException {
+				byte[] resultbuf = new byte[2];
+				byte[] resultbuf2 = new byte[2];
+				ByteBuffer bb = ByteBuffer.wrap(resultbuf).order(ByteOrder.BIG_ENDIAN);
+				ByteBuffer bb2 = ByteBuffer.wrap(resultbuf2).order(ByteOrder.BIG_ENDIAN);
+				
+				do {
+				resultbuf[0] = W5100_read8(addr);
+				resultbuf[1] = W5100_read8((short) (addr+1));
+				
+				resultbuf2[0] = W5100_read8(addr);
+				resultbuf2[1] = W5100_read8((short) (addr+1));
+				} while (bb.getShort(0) != bb2.getShort(0));
+				return bb.getShort(0);
+			}
+			private void W5100_read(short addr, byte[] dest) throws ConnectionLostException, InterruptedException {
+				byte[] cmdbuf = new byte[4];
+				byte[] respbuf = new byte[4];
+				ByteBuffer cmdbb = ByteBuffer.wrap(cmdbuf).order(ByteOrder.BIG_ENDIAN);
+				ByteBuffer destbb = ByteBuffer.wrap(dest).order(ByteOrder.BIG_ENDIAN);
+				
+				for (short off=0;off<dest.length;off++) {
+					cmdbb.clear();
+					cmdbb.put(Registers.READ_CMD);
+					cmdbb.putShort((short) (addr+off));
+					spi.writeRead(cmdbuf, cmdbuf.length, cmdbuf.length, respbuf, respbuf.length);
+					destbb.put(respbuf[0]);
+					//logByteArray("W5100_write(resp)", respbuf);
+				}
+			}
+			private void W5100_write(short addr, byte[] data) throws ConnectionLostException, InterruptedException {
 				byte[] cmdbuf = new byte[4];
 				byte[] respbuf = new byte[4];
 				ByteBuffer cmdbb = ByteBuffer.wrap(cmdbuf).order(ByteOrder.BIG_ENDIAN);
@@ -136,16 +213,16 @@ public class W5100Service extends IOIOService {
 					//logByteArray("W5100_write(resp)", respbuf);
 				}
 			}
-			public void W5100_write(short addr, byte data) throws ConnectionLostException, InterruptedException {
+			private void W5100_write(short addr, byte data) throws ConnectionLostException, InterruptedException {
 				W5100_write(addr,new byte[] {data});
 			}
-			public void W5100_write(short addr, short data) throws ConnectionLostException, InterruptedException {
+			private void W5100_write(short addr, short data) throws ConnectionLostException, InterruptedException {
 				byte[] dataa = new byte[2];
 				ByteBuffer bb = ByteBuffer.wrap(dataa).order(ByteOrder.BIG_ENDIAN);
 				bb.putShort(data);
 				W5100_write(addr,dataa);
 			}
-			public void W5100_write(short addr, int data) throws ConnectionLostException, InterruptedException {
+			private void W5100_write(short addr, int data) throws ConnectionLostException, InterruptedException {
 				byte[] dataa = new byte[4];
 				ByteBuffer bb = ByteBuffer.wrap(dataa).order(ByteOrder.BIG_ENDIAN);
 				bb.putInt(data);
@@ -158,6 +235,57 @@ public class W5100Service extends IOIOService {
 					sb.append(String.format("%02x", b));
 				}
 				Log.e(tag,sb.toString());
+			}
+			private String toHex(byte[] bytes) {
+				StringBuilder sb = new StringBuilder();
+				for (byte b: bytes) {
+					sb.append(String.format("%02x", b));
+				}
+				return sb.toString();
+			}
+			private String toHex(short data) {
+				return toHex(toBytes(data));
+			}
+			private String toHex(int data) {
+				return toHex(toBytes(data));
+			}
+			private byte[] toBytes(short data) {
+				byte[] dataa = new byte[2];
+				ByteBuffer bb = ByteBuffer.wrap(dataa).order(ByteOrder.BIG_ENDIAN);
+				bb.putShort(data);
+				return dataa;
+			}
+			private byte[] toBytes(int data) {
+				byte[] dataa = new byte[4];
+				ByteBuffer bb = ByteBuffer.wrap(dataa).order(ByteOrder.BIG_ENDIAN);
+				bb.putInt(data);
+				return dataa;
+			}
+			private short SOCKET_REG(int socket,int register) {return (short) (Registers.SOCKET_CMD_BASES[socket]+register);}
+			
+			// MAC socket can only be socket 0
+			private void setupMACSocket() throws ConnectionLostException, InterruptedException {
+				byte statusreg = 0;
+				while (statusreg != Registers.S_SR_MACRAW) {
+					// Set the socket mode
+					W5100_write(SOCKET_REG(0,Registers.S_MR), Registers.S_P_MACRAW);
+					W5100_write(SOCKET_REG(0,Registers.S_RX_RD0), (short) Registers.SOCKET_RX_BASES[0]);
+					W5100_write(SOCKET_REG(0,Registers.S_CR),Registers.S_CR_OPEN);
+					statusreg = W5100_read8(SOCKET_REG(0,Registers.S_SR));
+				}
+				
+			}
+			public void setupUDPSocket(int socket, short port) throws ConnectionLostException, InterruptedException {
+				byte statusreg = 0;
+				while (statusreg != Registers.S_SR_UDP) {
+					// Set the socket mode
+					W5100_write(SOCKET_REG(socket,Registers.S_MR), Registers.S_P_UDP);
+					W5100_write(SOCKET_REG(socket,Registers.S_PORT0),port);
+					W5100_write(SOCKET_REG(0,Registers.S_RX_RD0), (short) Registers.SOCKET_RX_BASES[socket]);
+					W5100_write(SOCKET_REG(socket,Registers.S_CR),Registers.S_CR_OPEN);
+					statusreg = W5100_read8(SOCKET_REG(socket,Registers.S_SR));
+				}
+				
 			}
 		};
 	}

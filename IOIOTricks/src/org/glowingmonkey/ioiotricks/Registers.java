@@ -52,6 +52,14 @@ public class Registers {
 	// Interrupt Mask
 	public final static short IMR = 0x0016;
 	
+	public final static byte IR_S0_INT = BIT0;
+	public final static byte IR_S1_INT = BIT1;
+	public final static byte IR_S2_INT = BIT2;
+	public final static byte IR_S3_INT = BIT3;
+	public final static byte IR_PPPoE = BIT5;
+	public final static byte IR_UNREACH = BIT6;
+	public final static byte IR_CONFLICT = BIT7;
+	
 	// Retry Time
 	public final static short RTR0 = 0x0017;
 	public final static short RTR1 = 0x0018;
@@ -84,6 +92,13 @@ public class Registers {
 	
 	
 	// Socket registers
+	public final static short[] SOCKET_CMD_BASES = {0x0400, 0x0500, 0x0600, 0x0700};
+	// RX & TX bases assume 2k per socket split
+	public final static short[] SOCKET_RX_BASES = {0x6000, 0x6800, 0x7000, 0x7800};
+	public final static short[] SOCKET_RX_MASKS = {0x07ff, 0x07ff, 0x07ff, 0x07ff};
+	public final static short[] SOCKET_TX_BASES = {0x4000, 0x4800, 0x5000, 0x5800};
+	public final static short[] SOCKET_TX_MASKS = {0x07ff, 0x07ff, 0x07ff, 0x07ff};
+	
 	public final static short SOCKET0 = 0x0400;
 	public final static short SOCKET1 = 0x0500;
 	public final static short SOCKET2 = 0x0600;
@@ -193,6 +208,6 @@ public class Registers {
 	
 	// Socket RX Read Pointer
 	public final static short S_RX_RD0 = 0x28;
-	public final static short S_RX_RD1 = 0x28;
+	public final static short S_RX_RD1 = 0x29;
 	
 }

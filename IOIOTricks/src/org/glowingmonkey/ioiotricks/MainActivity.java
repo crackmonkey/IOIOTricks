@@ -48,7 +48,8 @@ public class MainActivity extends Activity {
 	}
 
 	private Handler handler = new Handler() {
-	    public void handleMessage(Message message) {
+	    @Override
+		public void handleMessage(Message message) {
 			switch(message.what) {
 				case 1:
 					_log.append((String)message.obj + "\n");
