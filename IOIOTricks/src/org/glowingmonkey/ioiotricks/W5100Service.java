@@ -10,10 +10,12 @@ import ioio.lib.util.BaseIOIOLooper;
 import ioio.lib.util.IOIOLooper;
 import ioio.lib.util.android.IOIOService;
 
+import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import android.content.Intent;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.IBinder;
 import android.os.Message;
 import android.os.Messenger;
@@ -23,11 +25,55 @@ import android.util.Log;
 public class W5100Service extends IOIOService {
 	protected static final String LOG_MESSAGE = "org.glowingmonkey.ioiotricks.action.LOG";
 	protected static final String LOG_TEXT = "org.glowingmonkey.ioiotricks.fondler.LOGLINE";
+	static final int MSG_RESET = 1; // Reset the controller
+	static final int MSG_DHCP = 2; // Send DHCP Discover
+
 	Messenger messenger;
 
+    /**
+     * Handler of incoming messages from clients.
+     */
+    static class IncomingHandler extends Handler {
+        WeakReference<W5100Service> mFrag;
+
+        IncomingHandler(W5100Service aFragment) {
+            mFrag = new WeakReference<W5100Service>(aFragment);
+        }
+        @Override
+        public void handleMessage(Message msg) {
+            switch (msg.what) {
+                case MSG_RESET:
+                    break;
+                case MSG_DHCP:
+                	sendDhcpDiscover();
+                    break;
+                default:
+                    super.handleMessage(msg);
+            }
+        }
+    }
+
+    
+    public static void sendDhcpDiscover() {
+		// TODO Auto-generated method stub
+    	Log.d("sendDhcpDiscover", "faking sending a DHCP discover");
+	}
+
+	/**
+     * Target we publish for clients to send messages to IncomingHandler.
+     */
+    final Messenger mMessenger = new Messenger(new IncomingHandler(this));
+     /**
+     * When binding to the service, we return an interface to our messenger
+     * for sending messages to the service.
+     */
+    @Override
+    public IBinder onBind(Intent intent) {
+        return mMessenger.getBinder();
+    }
+    
 	@Override
 	public int onStartCommand(Intent intent, int flags, int startId) {
-		// TODO Auto-generated method stub
 		Bundle extras = intent.getExtras();
 		messenger = (Messenger) extras.get("MESSENGER");
 		return super.onStartCommand(intent, flags, startId);
@@ -73,7 +119,7 @@ public class W5100Service extends IOIOService {
 				// Gateway
 				W5100_write(Registers.GAR0, new byte[] {10,20,30,1});
 				
-				//setupMACSocket(); // Socket 0, mac raw
+				setupMACSocket(); // Socket 0, mac raw
 				setupUDPSocket(1, (short)68); // Socket 1, DHCP
 				setupUDPSocket(2, (short)138); // Socket 2, Browser
 				
@@ -104,7 +150,7 @@ public class W5100Service extends IOIOService {
 
 			private void handleSocketInt(int socket) throws ConnectionLostException, InterruptedException {
 				byte S_IR = W5100_read8(SOCKET_REG(socket,Registers.S_IR));
-				appLog("W5100 S"+Integer.toString(socket)+"_IR: 0x"+toHex(S_IR));
+				appLog("W5100 S"+Integer.toString(socket)+"_IR: 0x"+Util.toHex(S_IR));
 				StringBuilder events = new StringBuilder();
 				events.append("Interrupt on "+Integer.toString(socket));
 				if ((S_IR & Registers.S_IR_CON) != 0) {
@@ -114,17 +160,29 @@ public class W5100Service extends IOIOService {
 					events.append("(DISCON)");
 				}
 				if ((S_IR & Registers.S_IR_RECV) != 0) {
+					int headerlen = 0;
 					short RSR = W5100_read16(SOCKET_REG(socket,Registers.S_RX_RSR0));
 					short RD = W5100_read16(SOCKET_REG(socket,Registers.S_RX_RD0));
 					short off = (short) (RD & Registers.SOCKET_RX_MASKS[socket]);
-					events.append("(RECV "+toHex(RSR)+" at "+toHex(off)+")");
+					events.append("(RECV "+Util.toHex(RSR)+" at "+Util.toHex(off)+")");
 					// actually read the data from address Registers.SOCKET_RX_BASES[socket]+off onward, wrapping if needed
 					// ..or lie about it 
 					byte[] recvbuf = new byte[RSR];
 					W5100_read((short)(Registers.SOCKET_RX_BASES[socket]+off), recvbuf);
-					Log.d("UDP In", toHex(recvbuf));
+					if (socket == 0) { // MAC RAW socket
+						headerlen = 2; // 2 = W5100 MAC RAW header size
+						EthernetFrame newframe = new EthernetFrame(recvbuf);
+						Log.d("MACRAW In", newframe.toString());
+						appLog(newframe.toHeaderString());
+						Log.d("MACRAW debug", Util.toHex(recvbuf));
+					} else { // or UDP
+						headerlen = 8;  // 8 = W5100 UDP header size
+						UDPPacket newframe = new UDPPacket(recvbuf);
+						Log.d("UDP In", newframe.toString());
+						appLog(newframe.toHeaderString());
+					}
 					// Tell the W5100 we got it
-					W5100_write(SOCKET_REG(socket,Registers.S_RX_RD0), (short) (RD+RSR+8)); // 8 = W5100 UDP header size
+					W5100_write(SOCKET_REG(socket,Registers.S_RX_RD0), (short) (RD+RSR+headerlen));
 					W5100_write(SOCKET_REG(socket,Registers.S_CR), Registers.S_CR_RECV);
 					while (W5100_read8(SOCKET_REG(socket,Registers.S_CR)) != (byte) 0) {};
 				}
@@ -162,7 +220,7 @@ public class W5100Service extends IOIOService {
 				cmdbuf[3] = 0; // no data for a read
 				
 				spi.writeRead(cmdbuf, 3, 4, respbuf, 1);
-				Log.d("W5100_read8", "Read " + toHex(respbuf[0]) + " from "+toHex(addr));
+				//Log.d("W5100_read8", "Read " + Util.toHex(respbuf[0]) + " from "+Util.toHex(addr));
 				return respbuf[0];
 			}
 			private short W5100_read16(short addr) throws ConnectionLostException, InterruptedException {
@@ -182,18 +240,22 @@ public class W5100Service extends IOIOService {
 			}
 			private void W5100_read(short addr, byte[] dest) throws ConnectionLostException, InterruptedException {
 				byte[] cmdbuf = new byte[4];
-				byte[] respbuf = new byte[4];
+				byte[] respbuf = new byte[1];
 				ByteBuffer cmdbb = ByteBuffer.wrap(cmdbuf).order(ByteOrder.BIG_ENDIAN);
 				ByteBuffer destbb = ByteBuffer.wrap(dest).order(ByteOrder.BIG_ENDIAN);
 				
+				// TODO: Handle wrap arounds on the buffer
 				for (short off=0;off<dest.length;off++) {
 					cmdbb.clear();
 					cmdbb.put(Registers.READ_CMD);
 					cmdbb.putShort((short) (addr+off));
 					spi.writeRead(cmdbuf, cmdbuf.length, cmdbuf.length, respbuf, respbuf.length);
 					destbb.put(respbuf[0]);
+					//dest[off] = respbuf[0];
 					//logByteArray("W5100_write(resp)", respbuf);
 				}
+				Log.d("W5100_read(short,byte[])", "Read " + dest.length + " bytes starting from " + Util.toHex(addr));
+//				Log.d("W5100_read(short,byte[])", toHex(dest));
 			}
 			private void W5100_write(short addr, byte[] data) throws ConnectionLostException, InterruptedException {
 				byte[] cmdbuf = new byte[4];
@@ -236,31 +298,7 @@ public class W5100Service extends IOIOService {
 				}
 				Log.e(tag,sb.toString());
 			}
-			private String toHex(byte[] bytes) {
-				StringBuilder sb = new StringBuilder();
-				for (byte b: bytes) {
-					sb.append(String.format("%02x", b));
-				}
-				return sb.toString();
-			}
-			private String toHex(short data) {
-				return toHex(toBytes(data));
-			}
-			private String toHex(int data) {
-				return toHex(toBytes(data));
-			}
-			private byte[] toBytes(short data) {
-				byte[] dataa = new byte[2];
-				ByteBuffer bb = ByteBuffer.wrap(dataa).order(ByteOrder.BIG_ENDIAN);
-				bb.putShort(data);
-				return dataa;
-			}
-			private byte[] toBytes(int data) {
-				byte[] dataa = new byte[4];
-				ByteBuffer bb = ByteBuffer.wrap(dataa).order(ByteOrder.BIG_ENDIAN);
-				bb.putInt(data);
-				return dataa;
-			}
+
 			private short SOCKET_REG(int socket,int register) {return (short) (Registers.SOCKET_CMD_BASES[socket]+register);}
 			
 			// MAC socket can only be socket 0
@@ -288,12 +326,6 @@ public class W5100Service extends IOIOService {
 				
 			}
 		};
-	}
-
-	@Override
-	public IBinder onBind(Intent intent) {
-		// TODO Auto-generated method stub
-		return null;
 	}
 };
 
