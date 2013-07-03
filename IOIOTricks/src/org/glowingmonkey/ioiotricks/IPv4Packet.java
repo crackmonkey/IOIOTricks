@@ -16,7 +16,10 @@ public class IPv4Packet {
 		short payloadlen = bb.getShort();
 		IPPayload = new byte[payloadlen];
 	}
-	IPv4Packet() {}
+	IPv4Packet() {
+		srcip = new IPv4Address(0);
+		dstip = new IPv4Address(0);
+	}
 
 	@Override
 	public String toString() {

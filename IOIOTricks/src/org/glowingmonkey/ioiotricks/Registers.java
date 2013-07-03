@@ -199,8 +199,8 @@ public class Registers {
 	public final static short S_TX_RD1 = 0x23;
 	
 	// Socket TX Write Pointer
-	public final static short S_RX_WR0 = 0x24;
-	public final static short S_RX_WR1 = 0x25;
+	public final static short S_TX_WR0 = 0x24;
+	public final static short S_TX_WR1 = 0x25;
 
 	// Socket RX Received Size
 	public final static short S_RX_RSR0 = 0x26;

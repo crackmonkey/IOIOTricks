@@ -18,6 +18,8 @@ import android.widget.TextView;
 
 public class MainActivity extends Activity {
 	private TextView _log;
+	private TextView dhcp_server;
+	private TextView dhcp_ip;
     /** Messenger for communicating with the service. */
     Messenger mService = null;
 
@@ -30,6 +32,9 @@ public class MainActivity extends Activity {
 		setContentView(R.layout.activity_main);
 		_log = (TextView) findViewById(R.id.log);
 		_log.setMovementMethod(new ScrollingMovementMethod());
+		
+		dhcp_server = (TextView) findViewById(R.id.dhcp_server);
+		dhcp_ip = (TextView) findViewById(R.id.dhcp_ip);
 
 		Intent serviceIntent = new Intent(this, W5100Service.class);
 		Messenger messenger = new Messenger(handler);
@@ -43,6 +48,12 @@ public class MainActivity extends Activity {
         // Bind to the service
         bindService(new Intent(this, W5100Service.class), mConnection,
             Context.BIND_AUTO_CREATE);
+	}
+	
+	@Override
+	protected void onStop() {
+		super.onStop();
+		stopService(new Intent(this, W5100Service.class));
 	}
 //
 //	@Override
@@ -96,6 +107,13 @@ public class MainActivity extends Activity {
 			switch(message.what) {
 				case 1:
 					_log.append((String)message.obj + "\n");
+					break;
+				case 2:
+					DHCPPacket dhcppkt = (DHCPPacket) message.obj;
+					_log.append(dhcppkt.toHeaderString());
+					dhcp_server.setText(dhcppkt.siaddr.toString());
+					dhcp_ip.setText(dhcppkt.yiaddr.toString());
+					break;
 			}
 	    };
 	};

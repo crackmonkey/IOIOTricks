@@ -13,6 +13,9 @@ import ioio.lib.util.android.IOIOService;
 import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Queue;
+import java.util.concurrent.LinkedBlockingQueue;
+
 import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
@@ -27,6 +30,8 @@ public class W5100Service extends IOIOService {
 	protected static final String LOG_TEXT = "org.glowingmonkey.ioiotricks.fondler.LOGLINE";
 	static final int MSG_RESET = 1; // Reset the controller
 	static final int MSG_DHCP = 2; // Send DHCP Discover
+	
+	public Queue<IPv4Packet> txqueue = new LinkedBlockingQueue<IPv4Packet>(); ;
 
 	Messenger messenger;
 
@@ -45,7 +50,12 @@ public class W5100Service extends IOIOService {
                 case MSG_RESET:
                     break;
                 case MSG_DHCP:
-                	sendDhcpDiscover();
+                	W5100Service svc = mFrag.get();
+                	if (svc == null) {
+                		// nevermind, we lost the service, ignore this
+                		return;
+                	}
+                	sendDhcpDiscover(svc);
                     break;
                 default:
                     super.handleMessage(msg);
@@ -53,10 +63,18 @@ public class W5100Service extends IOIOService {
         }
     }
 
-    
-    public static void sendDhcpDiscover() {
-		// TODO Auto-generated method stub
-    	Log.d("sendDhcpDiscover", "faking sending a DHCP discover");
+ 
+    public static void sendDhcpDiscover(W5100Service svc) {
+    	Log.d("sendDhcpDiscover", "sending a DHCP discover");
+    	DHCPPacket dhcppkt = new DHCPPacket();
+    	// Discover
+    	dhcppkt.op = 1;
+    	dhcppkt.chaddr = new byte[] {(byte) 0xde, (byte) 0xad, (byte) 0xbe, (byte) 0xef, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    	byte[] broadcast = {(byte) 0xff,(byte) 0xff,(byte) 0xff,(byte) 0xff};
+    	dhcppkt.dstip = new IPv4Address(broadcast);
+    	dhcppkt.srcport = (short) 67;
+    	
+    	svc.txqueue.add(dhcppkt);
 	}
 
 	/**
@@ -119,9 +137,10 @@ public class W5100Service extends IOIOService {
 				// Gateway
 				W5100_write(Registers.GAR0, new byte[] {10,20,30,1});
 				
-				setupMACSocket(); // Socket 0, mac raw
-				setupUDPSocket(1, (short)68); // Socket 1, DHCP
-				setupUDPSocket(2, (short)138); // Socket 2, Browser
+				//setupMACSocket(); // Socket 0, mac raw
+				setupUDPSocket(1, (short)67); // Socket 1, DHCP to request
+				setupUDPSocket(2, (short)68); // Socket 2, DHCP to response
+				setupUDPSocket(3, (short)138); // Socket 2, Browser
 				
 				appLog("Setup complete");
 			};
@@ -143,6 +162,15 @@ public class W5100Service extends IOIOService {
 				}
 				if ((IR & Registers.IR_S3_INT) != 0){
 					handleSocketInt(3);
+				}
+				
+				if (!txqueue.isEmpty()) {
+					//IPv4Packet pkt = txqueue.poll();
+					UDPPacket pkt = (UDPPacket)txqueue.poll();
+					// sendUDP(int socket, IPv4Address dst, short port, byte[] payload)
+					Log.d("loop()", "Found a packet in the queue, attempting to transmit");
+					sendUDP(2, pkt.dstip, pkt.srcport, pkt.toBytes());
+					appLog("Transmitted: " + pkt.toHeaderString());
 				}
 				
 				Thread.sleep(100);
@@ -175,6 +203,21 @@ public class W5100Service extends IOIOService {
 						Log.d("MACRAW In", newframe.toString());
 						appLog(newframe.toHeaderString());
 						Log.d("MACRAW debug", Util.toHex(recvbuf));
+					} else if (socket == 1 || socket == 2) {
+						headerlen = 8;  // 8 = W5100 UDP header size
+						DHCPPacket newframe = new DHCPPacket(recvbuf);
+						Log.d("DHCP In", newframe.toString());
+						appLog(newframe.toHeaderString());
+						
+						Message msg = Message.obtain();
+						msg.what = 2;
+						msg.obj = newframe;
+						try {
+							messenger.send(msg);
+						} catch (RemoteException e) {
+							Log.e(getClass().getName(), "Exception sending DHCP message", e);
+							e.printStackTrace();
+						}
 					} else { // or UDP
 						headerlen = 8;  // 8 = W5100 UDP header size
 						UDPPacket newframe = new UDPPacket(recvbuf);
@@ -263,7 +306,7 @@ public class W5100Service extends IOIOService {
 				ByteBuffer cmdbb = ByteBuffer.wrap(cmdbuf).order(ByteOrder.BIG_ENDIAN);
 	
 				// if we're going to overflow the address space something is wrong
-				if ((data.length+addr) > Short.MAX_VALUE) { throw new IndexOutOfBoundsException(); };
+				if ((data.length+addr) > 0xFFFF) { throw new IndexOutOfBoundsException(); };
 				
 				for (short off=0;off<data.length;off++) {
 					cmdbb.clear();
@@ -271,9 +314,10 @@ public class W5100Service extends IOIOService {
 					cmdbb.putShort((short) (addr+off));
 					cmdbb.put(data[off]);
 					spi.writeRead(cmdbuf, cmdbuf.length, cmdbuf.length, respbuf, respbuf.length);
-					logByteArray("W5100_write(cmd)", cmdbuf);
+					//logByteArray("W5100_write(cmd)", cmdbuf);
 					//logByteArray("W5100_write(resp)", respbuf);
 				}
+				Log.d("W5100_write(short,byte[])", "Wrote " + data.length + " bytes starting from " + Util.toHex(addr));
 			}
 			private void W5100_write(short addr, byte data) throws ConnectionLostException, InterruptedException {
 				W5100_write(addr,new byte[] {data});
@@ -325,6 +369,28 @@ public class W5100Service extends IOIOService {
 				}
 				
 			}
+		    public void sendUDP(int socket, IPv4Address dst, short port, byte[] payload) throws ConnectionLostException, InterruptedException{
+		    	W5100_write(SOCKET_REG(socket,(int)Registers.S_DIPR0), dst.addr);
+		    	W5100_write(SOCKET_REG(socket,(int)Registers.S_DPORT0), port);
+		    	
+		    	short off  = (short) (W5100_read16(SOCKET_REG(socket,(int)Registers.S_TX_WR0)) & Registers.SOCKET_TX_MASKS[socket]);
+		    	short base = (short) (Registers.SOCKET_TX_BASES[socket]);
+		    	
+		    	// TODO: Split into multiple writes if we wrap the buffer
+		    	// For now, just overflow and hope nothing catches fire
+		    	W5100_write((short) (base+off), payload);
+		    	
+		    	W5100_write(SOCKET_REG(socket,(int)Registers.S_TX_WR0), (short)(off+payload.length));
+		    	
+		    	// send command
+		    	W5100_write(SOCKET_REG(socket,(int)Registers.S_CR), Registers.S_CR_SEND);
+		    	
+		    	short statusreg = 0xff;
+		    	// loop until the command completes
+		    	while (statusreg != 0x00) {
+		    		statusreg = W5100_read8(SOCKET_REG(socket,Registers.S_CR));
+		    	}
+		    }
 		};
 	}
 };

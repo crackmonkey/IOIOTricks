@@ -19,7 +19,7 @@ public class IPv4Address {
 
 	@Override
 	public String toString() {
-		return addr[0] + "." + addr[1] + "." + addr[2] + "." + addr[3];
+		return  ((int) addr[0] & 0xff) + "." + ((int) addr[1] & 0xff) + "." + ((int) addr[2] & 0xff) + "." + ((int) addr[3] & 0xff);
 	}
 
 }

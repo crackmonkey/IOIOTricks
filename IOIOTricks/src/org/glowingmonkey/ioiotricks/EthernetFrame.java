@@ -3,8 +3,6 @@ package org.glowingmonkey.ioiotricks;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
-import android.util.Log;
-
 public class EthernetFrame {
 	byte[] frame;
 	MACAddress src;
