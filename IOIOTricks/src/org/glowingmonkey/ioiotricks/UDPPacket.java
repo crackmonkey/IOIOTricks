@@ -8,13 +8,14 @@ import android.util.Log;
 public class UDPPacket extends IPv4Packet {
 	short srcport;
 	byte[] UDPPayload;
+	short payloadlen;
 	
 	UDPPacket(byte[] framein) {
 		ByteBuffer bb = ByteBuffer.wrap(framein).order(ByteOrder.BIG_ENDIAN);
 		srcip = new IPv4Address(bb.getInt());
 		srcport = bb.getShort();
 		
-		short payloadlen = bb.getShort();
+		payloadlen = bb.getShort();
 		
 		if (payloadlen != bb.remaining()) {
 			Log.d("UDPPacket decode", "WTF, W5100 length doesn't match buffer size: " + payloadlen + " vs " + bb.remaining());

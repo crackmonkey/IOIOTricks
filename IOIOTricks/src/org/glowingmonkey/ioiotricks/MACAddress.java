@@ -6,6 +6,10 @@ public class MACAddress {
 	public MACAddress(byte[] inaddr) {
 		addr = inaddr;
 	}
+	
+	public MACAddress() {
+		addr = new byte[6];
+	}
 
 	@Override
 	public String toString() {

@@ -5,6 +5,7 @@ import ioio.lib.api.DigitalOutput;
 import ioio.lib.api.DigitalInput.Spec.Mode;
 import ioio.lib.api.SpiMaster;
 import ioio.lib.api.SpiMaster.Rate;
+import ioio.lib.api.SpiMaster.Result;
 import ioio.lib.api.exception.ConnectionLostException;
 import ioio.lib.util.BaseIOIOLooper;
 import ioio.lib.util.IOIOLooper;
@@ -114,7 +115,7 @@ public class W5100Service extends IOIOService {
 						Mode.PULL_UP), new DigitalOutput.Spec(mosiPin),
 						new DigitalOutput.Spec(clkPin),
 						new DigitalOutput.Spec[] { new DigitalOutput.Spec(ssPin) },
-						new SpiMaster.Config(Rate.RATE_1M, false, false));
+						new SpiMaster.Config(Rate.RATE_8M, false, false));
 				
 				// Reset the chip
 				W5100_write(Registers.MR, Registers.MR_RST);
@@ -140,7 +141,7 @@ public class W5100Service extends IOIOService {
 				//setupMACSocket(); // Socket 0, mac raw
 				setupUDPSocket(1, (short)67); // Socket 1, DHCP to request
 				setupUDPSocket(2, (short)68); // Socket 2, DHCP to response
-				setupUDPSocket(3, (short)138); // Socket 2, Browser
+				setupUDPSocket(3, (short)5678); // Socket 3, MikroTik Neighbor Discovery Protocol
 				
 				appLog("Setup complete");
 			};
@@ -189,23 +190,24 @@ public class W5100Service extends IOIOService {
 				}
 				if ((S_IR & Registers.S_IR_RECV) != 0) {
 					int headerlen = 0;
-					short RSR = W5100_read16(SOCKET_REG(socket,Registers.S_RX_RSR0));
+					short get_size = W5100_read16(SOCKET_REG(socket,Registers.S_RX_RSR0));
 					short RD = W5100_read16(SOCKET_REG(socket,Registers.S_RX_RD0));
 					short off = (short) (RD & Registers.SOCKET_RX_MASKS[socket]);
-					events.append("(RECV "+Util.toHex(RSR)+" at "+Util.toHex(off)+")");
+					events.append("(RECV "+Util.toHex(get_size)+" at "+Util.toHex(off)+")");
 					// actually read the data from address Registers.SOCKET_RX_BASES[socket]+off onward, wrapping if needed
 					// ..or lie about it 
-					byte[] recvbuf = new byte[RSR];
-					W5100_read((short)(Registers.SOCKET_RX_BASES[socket]+off), recvbuf);
+					byte[] recvbuf = new byte[get_size];
+					W5100_read_wrap((short)(Registers.SOCKET_RX_BASES[socket]+off), recvbuf, Registers.SOCKET_RX_BASES[socket], Registers.SOCKET_RX_MASKS[socket]);
 					if (socket == 0) { // MAC RAW socket
 						headerlen = 2; // 2 = W5100 MAC RAW header size
 						EthernetFrame newframe = new EthernetFrame(recvbuf);
 						Log.d("MACRAW In", newframe.toString());
 						appLog(newframe.toHeaderString());
 						Log.d("MACRAW debug", Util.toHex(recvbuf));
-					} else if (socket == 1 || socket == 2) {
+					} else if (socket == 1 || socket == 2) { // DHCP
 						headerlen = 8;  // 8 = W5100 UDP header size
 						DHCPPacket newframe = new DHCPPacket(recvbuf);
+						get_size = newframe.payloadlen;
 						Log.d("DHCP In", newframe.toString());
 						appLog(newframe.toHeaderString());
 						
@@ -218,14 +220,15 @@ public class W5100Service extends IOIOService {
 							Log.e(getClass().getName(), "Exception sending DHCP message", e);
 							e.printStackTrace();
 						}
-					} else { // or UDP
+					} else { // MNDP
 						headerlen = 8;  // 8 = W5100 UDP header size
-						UDPPacket newframe = new UDPPacket(recvbuf);
-						Log.d("UDP In", newframe.toString());
+						MNDPPacket newframe = new MNDPPacket(recvbuf);
+						get_size = newframe.payloadlen;
+						Log.d("MNDP In", newframe.toString());
 						appLog(newframe.toHeaderString());
 					}
 					// Tell the W5100 we got it
-					W5100_write(SOCKET_REG(socket,Registers.S_RX_RD0), (short) (RD+RSR+headerlen));
+					W5100_write(SOCKET_REG(socket,Registers.S_RX_RD0), (short) (RD+get_size+headerlen));
 					W5100_write(SOCKET_REG(socket,Registers.S_CR), Registers.S_CR_RECV);
 					while (W5100_read8(SOCKET_REG(socket,Registers.S_CR)) != (byte) 0) {};
 				}
@@ -273,11 +276,11 @@ public class W5100Service extends IOIOService {
 				ByteBuffer bb2 = ByteBuffer.wrap(resultbuf2).order(ByteOrder.BIG_ENDIAN);
 				
 				do {
-				resultbuf[0] = W5100_read8(addr);
-				resultbuf[1] = W5100_read8((short) (addr+1));
-				
-				resultbuf2[0] = W5100_read8(addr);
-				resultbuf2[1] = W5100_read8((short) (addr+1));
+					resultbuf[0] = W5100_read8(addr);
+					resultbuf[1] = W5100_read8((short) (addr+1));
+					
+					resultbuf2[0] = W5100_read8(addr);
+					resultbuf2[1] = W5100_read8((short) (addr+1));
 				} while (bb.getShort(0) != bb2.getShort(0));
 				return bb.getShort(0);
 			}
@@ -300,23 +303,55 @@ public class W5100Service extends IOIOService {
 				Log.d("W5100_read(short,byte[])", "Read " + dest.length + " bytes starting from " + Util.toHex(addr));
 //				Log.d("W5100_read(short,byte[])", toHex(dest));
 			}
+			private void W5100_read_wrap(short addr, byte[] dest, short baseaddr, short addrmask) throws ConnectionLostException, InterruptedException {
+				byte[] cmdbuf = new byte[4];
+				byte[] respbuf = new byte[1];
+				ByteBuffer cmdbb = ByteBuffer.wrap(cmdbuf).order(ByteOrder.BIG_ENDIAN);
+				ByteBuffer destbb = ByteBuffer.wrap(dest).order(ByteOrder.BIG_ENDIAN);
+				short readptr = (short) (baseaddr + (addr & addrmask));
+				
+				for (short off=0;off<dest.length;off++) {
+					cmdbb.clear();
+					cmdbb.put(Registers.READ_CMD);
+					cmdbb.putShort(readptr);
+					spi.writeRead(cmdbuf, cmdbuf.length, cmdbuf.length, respbuf, respbuf.length);
+					destbb.put(respbuf[0]);
+					//dest[off] = respbuf[0];
+					//logByteArray("W5100_write(resp)", respbuf);
+					readptr++;
+					if (off > addrmask) {
+						readptr = baseaddr;
+					}
+				}
+				Log.d("W5100_read_wrap(short,byte[])", "Read " + dest.length + " bytes starting from " + Util.toHex(addr));
+//				Log.d("W5100_read(short,byte[])", toHex(dest));
+			}
 			private void W5100_write(short addr, byte[] data) throws ConnectionLostException, InterruptedException {
 				byte[] cmdbuf = new byte[4];
 				byte[] respbuf = new byte[4];
 				ByteBuffer cmdbb = ByteBuffer.wrap(cmdbuf).order(ByteOrder.BIG_ENDIAN);
+				Result result = null;
 	
-				// if we're going to overflow the address space something is wrong
-				if ((data.length+addr) > 0xFFFF) { throw new IndexOutOfBoundsException(); };
+				if (data == null || data.length == 0) { 
+					Log.d("W5100_write", "Empty write, bailing");
+					return;
+				}
 				
+				// if we're going to overflow the address space something is wrong
+				if ((data.length+addr) > 0xFFFF) { throw new IndexOutOfBoundsException(); };		
+				
+				ioio_.beginBatch();
 				for (short off=0;off<data.length;off++) {
 					cmdbb.clear();
 					cmdbb.put(Registers.WRITE_CMD);
 					cmdbb.putShort((short) (addr+off));
 					cmdbb.put(data[off]);
-					spi.writeRead(cmdbuf, cmdbuf.length, cmdbuf.length, respbuf, respbuf.length);
+					result = spi.writeReadAsync(0, cmdbuf, cmdbuf.length, cmdbuf.length, respbuf, respbuf.length);
 					//logByteArray("W5100_write(cmd)", cmdbuf);
 					//logByteArray("W5100_write(resp)", respbuf);
 				}
+				ioio_.endBatch();
+				result.waitReady(); // wait for the last one to complete
 				Log.d("W5100_write(short,byte[])", "Wrote " + data.length + " bytes starting from " + Util.toHex(addr));
 			}
 			private void W5100_write(short addr, byte data) throws ConnectionLostException, InterruptedException {
@@ -328,12 +363,14 @@ public class W5100Service extends IOIOService {
 				bb.putShort(data);
 				W5100_write(addr,dataa);
 			}
+			@SuppressWarnings("unused")
 			private void W5100_write(short addr, int data) throws ConnectionLostException, InterruptedException {
 				byte[] dataa = new byte[4];
 				ByteBuffer bb = ByteBuffer.wrap(dataa).order(ByteOrder.BIG_ENDIAN);
 				bb.putInt(data);
 				W5100_write(addr,dataa);
 			}
+			@SuppressWarnings("unused")
 			private void logByteArray(String tag, byte[] bytes) {
 				StringBuilder sb = new StringBuilder();
 				//Log.e(tag,Hex.encodeHexString(bytes));
